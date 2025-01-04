@@ -1,0 +1,116 @@
+#!/bin/sh
+
+TIMESTAMP=$(date +%Y%m%d%H%M%S)
+LOG_FILE="PROCESSED/skrypt_${TIMESTAMP}.log" 
+BAD_FILE="InternetSales_new.bad_${TIMESTAMP}"
+
+mkdir -p PROCESSED
+
+wget -N http://home.agh.edu.pl/~wsarlej/dyd/bdp2/materialy/cw10/InternetSales_new.zip \
+	 && echo "$(date +%Y%m%d%H%M%S) - Downloading data - Successfull" >> $LOG_FILE || echo "$(date +%Y%m%d%H%M%S) - Downloading data - Failed" >> $LOG_FILE
+
+unzip -P bdp2agh -o InternetSales_new.zip \
+	 && echo "$(date +%Y%m%d%H%M%S) - Unzipping data - Successfull" >> $LOG_FILE || echo "$(date +%Y%m%d%H%M%S) - Unzipping data - Failed" >> $LOG_FILE
+
+columns_number=$(head -n 1 InternetSales_new.txt | awk -F'|' '{print NF}')
+
+# Funkcja wykrywająca numer kolumny na podstawie nazwy
+detect_column() {
+    local column_name=$1
+    local column_number
+
+    column_number=$(head -n 1 InternetSales_new.txt | awk -F'|' -v name="$column_name" '
+        {
+            for (i = 1; i <= NF; i++) {
+                if ($i == name) {
+                    print i;
+                    exit;
+                }
+            }
+        }
+    ')
+
+    if [[ -z $column_number ]]; then
+        echo "Column '$column_name' not found"
+        exit 1
+    fi
+
+    echo $column_number
+}
+
+order_quantity_column=$(detect_column "OrderQuantity")
+secret_code_column=$(detect_column "SecretCode")
+customer_name_column=$(detect_column "Customer_Name")
+ 
+grep -v '^$' InternetSales_new.txt | uniq | awk -F'|' -v cols=$columns_number -v order_col=$order_quantity_column -v secret_col=$secret_code_column -v customer_col=$customer_name_column -v OFS='|' '
+    NR == 1 { 
+        $customer_col="FIRST_NAME|LAST_NAME"
+	print
+    }  
+    NR > 1 && NF == cols && $order_col <= 100 && $secret_col == "" && $customer_col ~ /^"[^,]+,[^,]+"$/ { 
+	gsub(/"/, "", $customer_col)
+        split($customer_col, name_parts, ",");	
+        $customer_col=name_parts[2] "|" name_parts[1]
+        print 
+    } 
+    NR > 1 && (NF != cols || $order_col > 100 || $customer_col !~ /^"[^,]+,[^,]+"$/ ) {
+        print > "'$BAD_FILE'"
+    }
+    NR > 1 && ($secret_col != "") {
+        $secret_col = "";  
+        print > "'$BAD_FILE'"
+    }
+    ' > "PROCESSED/${TIMESTAMP}_InternetSales_new.txt" \
+	 && echo "$(date +%Y%m%d%H%M%S) - Validation - Successfull" >> $LOG_FILE || echo "$(date +%Y%m%d%H%M%S) - Validation - Failed" >> $LOG_FILE
+
+PROCESSED_FILENAME="PROCESSED/${TIMESTAMP}_InternetSales_new.txt"
+STUDENT_ID="406708"
+DB_USER="ewelina"
+DB_PASS="1234"
+DB_NAME="BDP2"
+TABLE_NAME="CUSTOMERS_${STUDENT_ID}"
+
+SQL_DB_CREATION_QUERY="
+DROP TABLE IF EXISTS ${TABLE_NAME};
+CREATE TABLE ${TABLE_NAME} (
+    ProductKey INT,
+    CurrencyAlternateKey VARCHAR(50),
+    FIRST_NAME VARCHAR(100),
+    LAST_NAME VARCHAR(100),
+    OrderDateKey DATE,
+    OrderQuantity INT,
+    UnitPrice DECIMAL(10, 2),
+    SecretCode VARCHAR(50)
+);"
+mysql -u$DB_USER -p$DB_PASS -e "$SQL_DB_CREATION_QUERY" $DB_NAME \
+	 && echo "$(date +%Y%m%d%H%M%S) - Table creation - Successfull" >> $LOG_FILE || echo "$(date +%Y%m%d%H%M%S) - Table creation - Failed" >> $LOG_FILE
+
+SQL_LOAD_QUERY="
+LOAD DATA LOCAL INFILE '${PROCESSED_FILENAME}'
+INTO TABLE ${TABLE_NAME}
+FIELDS TERMINATED BY '|'
+LINES TERMINATED BY '\n'
+IGNORE 1 LINES
+(ProductKey, CurrencyAlternateKey, FIRST_NAME, LAST_NAME, OrderDateKey, OrderQuantity, UnitPrice, SecretCode);
+"
+mysql --local-infile=1 -u $DB_USER -p$DB_PASS $DB_NAME -e "$SQL_LOAD_QUERY" \
+	 && echo "$(date +%Y%m%d%H%M%S) - Upload data to db table - Successfull" >> $LOG_FILE || echo "$(date +%Y%m%d%H%M%S) - Upload data to db table - Failed" >> $LOG_FILE
+    
+SQL_UPDATE_QUERY="
+UPDATE ${TABLE_NAME}
+SET SecretCode = (SELECT LEFT(MD5(RAND()), 10));
+"
+mysql -u $DB_USER -p$DB_PASS $DB_NAME -e "$SQL_UPDATE_QUERY" \
+	 && echo "$(date +%Y%m%d%H%M%S) - Secret codes generation - Successfull" >> $LOG_FILE || echo "$(date +%Y%m%d%H%M%S) - Secret code generation - Failed" >> $LOG_FILE
+
+OUTPUT_FILE="CUSTOMERS_${STUDENT_ID}.csv"
+OUTPUT_ZIP_FILE="CUSTOMERS_${STUDENT_ID}.zip"
+
+mysql -u $DB_USER -p$DB_PASS $DB_NAME -e "
+SELECT *
+FROM CUSTOMERS_${STUDENT_ID};
+" | sed 's/\t/,/g' > ${OUTPUT_FILE} \
+	 && echo "$(date +%Y%m%d%H%M%S) - Data export to CSV - Successfull" >> $LOG_FILE || echo "$(date +%Y%m%d%H%M%S) - Data export to CSV - Failed" >> $LOG_FILE
+
+zip ${OUTPUT_ZIP_FILE} ${OUTPUT_FILE} \
+	 && echo "$(date +%Y%m%d%H%M%S) - CSV file compression - Successfull" >> $LOG_FILE || echo "$(date +%Y%m%d%H%M%S) - CSV file compression - Failed" >> $LOG_FILE

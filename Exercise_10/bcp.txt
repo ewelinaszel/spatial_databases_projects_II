@@ -1,0 +1,3 @@
+bcp AdventureWorksDW2019.dbo.CUSTOMERS_406708 format nul -f format_customers.fmt -c -t ',' -T -S localhost
+
+bcp [AdventureWorksDW2019].[dbo].[CUSTOMERS_406708] in CUSTOMERS_406708.csv -f format_customers.fmt -T -S localhost
