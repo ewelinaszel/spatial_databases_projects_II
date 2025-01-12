@@ -1,25 +1,63 @@
-#!/bin/sh
+#!/bin/bash
 
-TIMESTAMP=$(date +%Y%m%d%H%M%S)
+# Changelog
+#
+# All notable changes to this script will be documented in this file.
+#
+# The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+# and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+#
+# ## [Unreleased]
+#
+# ### Added
+# - Initial release of the script.
+# - Core functionality to fetching, parsing, validating and uploding data from file to database
+#
+# ### Changed
+# - Placeholder for future changes.
+#
+# ### Removed
+# - Placeholder for future removals.
+#
+# ## [1.0.0] - 2025-01-12
+#
+#
+# [unreleased]: https://github.com/ewelinaszel/spatial_databases_projects_II/compare/v1.0.0...HEAD
+# [1.0.0]: https://github.com/ewelinaszel/spatial_databases_projects_II/releases/tag/v1.0.0
+
+
+TIMESTAMP=$(date +%m%d%Y)
 LOG_FILE="PROCESSED/skrypt_${TIMESTAMP}.log" 
 BAD_FILE="InternetSales_new.bad_${TIMESTAMP}"
+FILE_URL="http://home.agh.edu.pl/~wsarlej/dyd/bdp2/materialy/cw10/InternetSales_new.zip"
+FILE_PASSWORD="bdp2agh"
+DOWNLOAD_FILE_NAME="InternetSales_new.zip"
+
+log() {
+    local message="$1"
+    echo "$message" >>"$LOG_FILE"
+    echo "$message"
+}
 
 mkdir -p PROCESSED
+mkdir -p TMP
 
-wget -N http://home.agh.edu.pl/~wsarlej/dyd/bdp2/materialy/cw10/InternetSales_new.zip \
-	 && echo "$(date +%Y%m%d%H%M%S) - Downloading data - Successfull" >> $LOG_FILE || echo "$(date +%Y%m%d%H%M%S) - Downloading data - Failed" >> $LOG_FILE
+# Pobieranie wskazanego pliku z internetu
+wget -O $DOWNLOAD_FILE_NAME -N $FILE_URL \
+	 > /dev/null 2>&1 && log "$(date +%Y%m%d%H%M%S) - Downloading data - Successfull" || log "$(date +%Y%m%d%H%M%S) - Downloading data - Failed"
 
-unzip -P bdp2agh -o InternetSales_new.zip \
-	 && echo "$(date +%Y%m%d%H%M%S) - Unzipping data - Successfull" >> $LOG_FILE || echo "$(date +%Y%m%d%H%M%S) - Unzipping data - Failed" >> $LOG_FILE
+# Rozpakowanie pobranego pliku
+unzip -P $FILE_PASSWORD -o InternetSales_new.zip -d TMP\
+	 > /dev/null 2>&1 && log "$(date +%Y%m%d%H%M%S) - Unzipping data - Successfull" || log "$(date +%Y%m%d%H%M%S) - Unzipping data - Failed"
 
-columns_number=$(head -n 1 InternetSales_new.txt | awk -F'|' '{print NF}')
+columns_number=$(head -n 1 TMP/InternetSales_new.txt | awk -F'|' '{print NF}')
 
 # Funkcja wykrywająca numer kolumny na podstawie nazwy
 detect_column() {
     local column_name=$1
     local column_number
 
-    column_number=$(head -n 1 InternetSales_new.txt | awk -F'|' -v name="$column_name" '
+    column_number=$(head -n 1 TMP/InternetSales_new.txt | awk -F'|' -v name="$column_name" '
         {
             for (i = 1; i <= NF; i++) {
                 if ($i == name) {
@@ -42,34 +80,53 @@ order_quantity_column=$(detect_column "OrderQuantity")
 secret_code_column=$(detect_column "SecretCode")
 customer_name_column=$(detect_column "Customer_Name")
  
-grep -v '^$' InternetSales_new.txt | uniq | awk -F'|' -v cols=$columns_number -v order_col=$order_quantity_column -v secret_col=$secret_code_column -v customer_col=$customer_name_column -v OFS='|' '
+# Walidacja zawartości rozpakowanego pliku oraz wymagane transformacje
+grep -v '^$' TMP/InternetSales_new.txt | uniq | awk -F'|' -v cols=$columns_number -v order_col=$order_quantity_column -v secret_col=$secret_code_column -v customer_col=$customer_name_column -v OFS='|' '
+    # poniższą funkcję możnaby zastąpić prostym dopasowaniem do wyrażenia regularnego /^"[^,]+,[^,]+"$/ jednak z uwagi na warunki zadania, została zaimplementowana bez użycia tego mechanizmu:
+    function customer_col_valid(col) {
+	    if (substr(col, 1, 1) == "\"" && substr(col, length(col), 1) == "\"") {
+		inner_content = substr(col, 2, length(col) - 2)
+		comma_count = gsub(",", "", inner_content)
+		if (substr(inner_content, 1, 1) != "," && substr(inner_content, length(inner_content), 1) != "," && comma_count == 1) {
+		    return 1
+		}
+	    }
+
+	    return 0
+    }
+
+    
     NR == 1 { 
+        print > "'$BAD_FILE'"
         $customer_col="FIRST_NAME|LAST_NAME"
 	print
-    }  
-    NR > 1 && NF == cols && $order_col <= 100 && $secret_col == "" && $customer_col ~ /^"[^,]+,[^,]+"$/ { 
+    }
+    NR > 1 && (NF != cols || $order_col > 100 || !customer_col_valid($customer_col)) {
+        print > "'$BAD_FILE'"
+    } 
+    NR > 1 && NF == cols && $order_col <= 100 && $secret_col == "" && customer_col_valid($customer_col) { 
 	gsub(/"/, "", $customer_col)
         split($customer_col, name_parts, ",");	
         $customer_col=name_parts[2] "|" name_parts[1]
         print 
     } 
-    NR > 1 && (NF != cols || $order_col > 100 || $customer_col !~ /^"[^,]+,[^,]+"$/ ) {
-        print > "'$BAD_FILE'"
-    }
     NR > 1 && ($secret_col != "") {
         $secret_col = "";  
         print > "'$BAD_FILE'"
     }
     ' > "PROCESSED/${TIMESTAMP}_InternetSales_new.txt" \
-	 && echo "$(date +%Y%m%d%H%M%S) - Validation - Successfull" >> $LOG_FILE || echo "$(date +%Y%m%d%H%M%S) - Validation - Failed" >> $LOG_FILE
+	 && log "$(date +%Y%m%d%H%M%S) - Validation - Successfull" || log "$(date +%Y%m%d%H%M%S) - Validation - Failed"
 
 PROCESSED_FILENAME="PROCESSED/${TIMESTAMP}_InternetSales_new.txt"
 STUDENT_ID="406708"
 DB_USER="ewelina"
-DB_PASS="1234"
+
+DB_PASS_BASE64="MTIzNA=="
+DB_PASS=$(echo "$DB_PASS_BASE64" | base64 --decode) # użycie base64 w zasadzie nie zabezpiecza hasła wcale - bardzo łatwo jest takie hasło odkodować (base64 to metoda kodowania, a nie szyfrowania)
 DB_NAME="BDP2"
 TABLE_NAME="CUSTOMERS_${STUDENT_ID}"
 
+# Stworzenie tabeli w bazie msql
 SQL_DB_CREATION_QUERY="
 DROP TABLE IF EXISTS ${TABLE_NAME};
 CREATE TABLE ${TABLE_NAME} (
@@ -83,8 +140,9 @@ CREATE TABLE ${TABLE_NAME} (
     SecretCode VARCHAR(50)
 );"
 mysql -u$DB_USER -p$DB_PASS -e "$SQL_DB_CREATION_QUERY" $DB_NAME \
-	 && echo "$(date +%Y%m%d%H%M%S) - Table creation - Successfull" >> $LOG_FILE || echo "$(date +%Y%m%d%H%M%S) - Table creation - Failed" >> $LOG_FILE
+	 > /dev/null 2>&1 && log "$(date +%Y%m%d%H%M%S) - Table creation - Successfull" || log "$(date +%Y%m%d%H%M%S) - Table creation - Failed"
 
+# Załadowanie danych do uprzednio stworzonej tabeli
 SQL_LOAD_QUERY="
 LOAD DATA LOCAL INFILE '${PROCESSED_FILENAME}'
 INTO TABLE ${TABLE_NAME}
@@ -94,23 +152,31 @@ IGNORE 1 LINES
 (ProductKey, CurrencyAlternateKey, FIRST_NAME, LAST_NAME, OrderDateKey, OrderQuantity, UnitPrice, SecretCode);
 "
 mysql --local-infile=1 -u $DB_USER -p$DB_PASS $DB_NAME -e "$SQL_LOAD_QUERY" \
-	 && echo "$(date +%Y%m%d%H%M%S) - Upload data to db table - Successfull" >> $LOG_FILE || echo "$(date +%Y%m%d%H%M%S) - Upload data to db table - Failed" >> $LOG_FILE
+	 > /dev/null 2>&1 && log "$(date +%Y%m%d%H%M%S) - Upload data to db table - Successfull" || log "$(date +%Y%m%d%H%M%S) - Upload data to db table - Failed"
     
+# Wygenerowanie zawartości kolumny SecretCode
 SQL_UPDATE_QUERY="
 UPDATE ${TABLE_NAME}
 SET SecretCode = (SELECT LEFT(MD5(RAND()), 10));
 "
 mysql -u $DB_USER -p$DB_PASS $DB_NAME -e "$SQL_UPDATE_QUERY" \
-	 && echo "$(date +%Y%m%d%H%M%S) - Secret codes generation - Successfull" >> $LOG_FILE || echo "$(date +%Y%m%d%H%M%S) - Secret code generation - Failed" >> $LOG_FILE
+	 > /dev/null 2>&1 && log "$(date +%Y%m%d%H%M%S) - Secret codes generation - Successfull" || log "$(date +%Y%m%d%H%M%S) - Secret code generation - Failed"
 
 OUTPUT_FILE="CUSTOMERS_${STUDENT_ID}.csv"
 OUTPUT_ZIP_FILE="CUSTOMERS_${STUDENT_ID}.zip"
 
+# Wyeksportowanie zawartości tabeli do pliku csv
 mysql -u $DB_USER -p$DB_PASS $DB_NAME -e "
 SELECT *
 FROM CUSTOMERS_${STUDENT_ID};
-" | sed 's/\t/,/g' > ${OUTPUT_FILE} \
-	 && echo "$(date +%Y%m%d%H%M%S) - Data export to CSV - Successfull" >> $LOG_FILE || echo "$(date +%Y%m%d%H%M%S) - Data export to CSV - Failed" >> $LOG_FILE
+" 2>/dev/null | sed 's/\t/,/g' > ${OUTPUT_FILE} \
+	 && log "$(date +%Y%m%d%H%M%S) - Data export to CSV - Successfull" || log "$(date +%Y%m%d%H%M%S) - Data export to CSV - Failed"
 
+# Kompresja wyeksportowanego pliku
 zip ${OUTPUT_ZIP_FILE} ${OUTPUT_FILE} \
-	 && echo "$(date +%Y%m%d%H%M%S) - CSV file compression - Successfull" >> $LOG_FILE || echo "$(date +%Y%m%d%H%M%S) - CSV file compression - Failed" >> $LOG_FILE
+	 > /dev/null 2>&1 && log "$(date +%Y%m%d%H%M%S) - CSV file compression - Successfull" || log "$(date +%Y%m%d%H%M%S) - CSV file compression - Failed"
+
+# Posprzątanie - w wyniku działania skryptu w file systemie powinny pojawić się tylko pliki "InternetSales_new.bad_${TIMESTAMP}", "PROCESSED/skrypt_${TIMESTAMP}.log" oraz "CUSTOMERS_${STUDENT_ID}.zip" "PROCESSED/${TIMESTAMP}_InternetSales_new.txt". Pozostałe pliki tworzone w trakcie dziania skryptu powinny zostać usunięte
+rm ${OUTPUT_FILE}
+rm ${DOWNLOAD_FILE_NAME}
+rm -r TMP
